@@ -53,8 +53,8 @@
 // WIFI SETTINGS
 // ================================================================
 
-const char* WIFI_SSID = "IBR";
-const char* WIFI_PASSWORD = "8019912160";
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
 
 // ================================================================
@@ -1602,50 +1602,72 @@ void analyzeWater() {
 
 void autoControl() {
 
+  // AUTO LOGIC IS ACTIVE ONLY IN AUTO MODE.
   if (systemMode != MODE_AUTO) {
     return;
   }
 
-  // CHANNEL MEDIUM/HIGH + FIELD LOW = SUPPLY WATER
-  if (fieldLevel == 0 && channelLevel >= 1) {
+  // =============================================================
+  // TARGET FIELD LEVEL = MEDIUM
+  // LOW    -> OPEN if channel has water
+  // MEDIUM -> CLOSE / HOLD
+  // HIGH   -> OPEN only if channel is lower than field (DRAIN)
+  // =============================================================
 
-    if (gateState == GATE_CLOSED) {
-      openGate(
-        channelLevel == 2
-        ? "Channel HIGH - field LOW"
-        : "Channel MEDIUM - field LOW"
-      );
+  // FIELD LOW: bring water into the field.
+  if (fieldLevel == 0) {
+
+    if (channelLevel >= 1) {
+
+      if (gateState == GATE_CLOSED) {
+        openGate(
+          channelLevel == 2
+          ? "Field LOW - Channel HIGH"
+          : "Field LOW - Channel MEDIUM"
+        );
+      }
+
+    }
+    else {
+
+      // Both are LOW: there is no useful water supply.
+      if (gateState == GATE_OPEN) {
+        closeGate("Field LOW - Channel LOW");
+      }
     }
 
     return;
   }
 
-  // FIELD HIGH = DRAINAGE PRIORITY
-  if (fieldLevel == 2) {
-
-    if (gateState == GATE_CLOSED) {
-      openGate("Field HIGH - drainage");
-    }
-
-    return;
-  }
-
-  // FIELD RISING = POSSIBLE RAIN / RUNOFF
-  if (fieldLevel >= 1 && fieldTrend == "RISING") {
-
-    if (gateState == GATE_CLOSED) {
-      openGate("Possible rain/runoff");
-    }
-
-    return;
-  }
-
-  // CLOSE ONLY WHEN BOTH CHANNEL AND FIELD ARE LOW
-  if (fieldLevel == 0 && channelLevel == 0) {
+  // FIELD MEDIUM: desired level reached.
+  if (fieldLevel == 1) {
 
     if (gateState == GATE_OPEN) {
-      closeGate("Channel and field LOW");
+      closeGate("Field MEDIUM - Maintain Level");
     }
+
+    return;
+  }
+
+  // FIELD HIGH: drain only when channel level is lower.
+  if (fieldLevel == 2) {
+
+    if (channelLevel < fieldLevel) {
+
+      if (gateState == GATE_CLOSED) {
+        openGate("Field HIGH - Drainage");
+      }
+
+    }
+    else {
+
+      // Channel is also HIGH, so there is no safe drainage gradient.
+      if (gateState == GATE_OPEN) {
+        closeGate("Field HIGH - Channel HIGH");
+      }
+    }
+
+    return;
   }
 }
 
@@ -1656,35 +1678,76 @@ void autoControl() {
 
 void updateMode() {
 
-  // ==============================================================
+  // Read the physical switch position every cycle.
+  bool manual = digitalRead(MANUAL_SWITCH) == LOW;
+  bool automatic = digitalRead(AUTO_SWITCH) == LOW;
+
+  // Valid physical selection.
+  int physicalSelection = -1;
+
+  if (manual && !automatic) {
+    physicalSelection = MODE_MANUAL;
+  }
+  else if (automatic && !manual) {
+    physicalSelection = MODE_AUTO;
+  }
+
+  // ---------------------------------------------------------------
+  // PHYSICAL SWITCH HAS HIGHEST PRIORITY WHEN IT IS CHANGED
+  // ---------------------------------------------------------------
+  // This is the important part: if the physical switch changes while
+  // a web override is active, the web override is cancelled immediately.
+  static int lastPhysicalSelection = -2;
+
+  if (physicalSelection != -1 &&
+      physicalSelection != lastPhysicalSelection) {
+
+    lastPhysicalSelection = physicalSelection;
+
+    webModeOverride = false;
+
+    systemMode =
+      physicalSelection == MODE_MANUAL
+      ? MODE_MANUAL
+      : MODE_AUTO;
+
+    if (systemMode == MODE_MANUAL) {
+      addHistory("Physical switch: MANUAL - Web override cancelled");
+      showEvent(
+        "MANUAL MODE",
+        "PHYSICAL SWITCH",
+        "WEB OVERRIDE OFF"
+      );
+    }
+    else {
+      addHistory("Physical switch: AUTO - Web override cancelled");
+      showEvent(
+        "AUTO MODE",
+        "PHYSICAL SWITCH",
+        "WEB OVERRIDE OFF"
+      );
+    }
+
+    return;
+  }
+
+  // ---------------------------------------------------------------
   // WEB OVERRIDE
-  // ==============================================================
+  // ---------------------------------------------------------------
+  // If the physical switch has NOT changed, the web-selected mode
+  // remains active and overrides the physical switch setting.
+  if (webModeOverride) {
 
-  if (
-    webModeOverride
-  ) {
+    if (systemMode != webSelectedMode) {
 
-    if (
-      systemMode !=
-      webSelectedMode
-    ) {
-
-      systemMode =
-        webSelectedMode;
-
+      systemMode = webSelectedMode;
 
       String modeName =
-        systemMode ==
-        MODE_AUTO
+        systemMode == MODE_AUTO
         ? "AUTO"
         : "MANUAL";
 
-
-      addHistory(
-        "Web override: " +
-        modeName
-      );
-
+      addHistory("Web override: " + modeName);
 
       showEvent(
         "WEB OVERRIDE",
@@ -1693,88 +1756,17 @@ void updateMode() {
       );
     }
 
-
     return;
   }
 
-
-  // ==============================================================
-  // PHYSICAL SWITCH
-  // ==============================================================
-
-  bool manual =
-    digitalRead(
-      MANUAL_SWITCH
-    ) == LOW;
-
-
-  bool automatic =
-    digitalRead(
-      AUTO_SWITCH
-    ) == LOW;
-
-
-  // ==============================================================
-  // MANUAL
-  // ==============================================================
-
-  if (
-    manual &&
-    !automatic
-  ) {
-
-    if (
-      systemMode !=
-      MODE_MANUAL
-    ) {
-
-      systemMode =
-        MODE_MANUAL;
-
-
-      addHistory(
-        "Physical switch: MANUAL"
-      );
-
-
-      showEvent(
-        "MANUAL MODE",
-        "PHYSICAL SWITCH",
-        "CONTROL ENABLED"
-      );
-    }
+  // ---------------------------------------------------------------
+  // PHYSICAL SWITCH STEADY STATE
+  // ---------------------------------------------------------------
+  if (physicalSelection == MODE_MANUAL) {
+    systemMode = MODE_MANUAL;
   }
-
-
-  // ==============================================================
-  // AUTO
-  // ==============================================================
-
-  else if (
-    automatic &&
-    !manual
-  ) {
-
-    if (
-      systemMode !=
-      MODE_AUTO
-    ) {
-
-      systemMode =
-        MODE_AUTO;
-
-
-      addHistory(
-        "Physical switch: AUTO"
-      );
-
-
-      showEvent(
-        "AUTO MODE",
-        "PHYSICAL SWITCH",
-        "AUTOMATION ENABLED"
-      );
-    }
+  else if (physicalSelection == MODE_AUTO) {
+    systemMode = MODE_AUTO;
   }
 }
 
@@ -2017,45 +2009,32 @@ void checkTimer() {
 
 void handleMode() {
 
-  if (
-    !server.hasArg(
-      "action"
-    )
-  ) {
-
-    server.send(
-      400,
-      "text/plain",
-      "Missing action"
-    );
-
+  if (!server.hasArg("action")) {
+    server.send(400, "text/plain", "Missing action");
     return;
   }
 
+  String action = server.arg("action");
 
-  String action =
-    server.arg(
-      "action"
-    );
+  // ---------------------------------------------------------------
+  // RETURN TO PHYSICAL SWITCH CONTROL
+  // ---------------------------------------------------------------
+  if (action == "physical") {
 
+    webModeOverride = false;
 
-  // ==============================================================
-  // PHYSICAL SWITCH
-  // ==============================================================
+    // Immediately read and apply the physical switch.
+    bool manual = digitalRead(MANUAL_SWITCH) == LOW;
+    bool automatic = digitalRead(AUTO_SWITCH) == LOW;
 
-  if (
-    action ==
-    "physical"
-  ) {
+    if (manual && !automatic) {
+      systemMode = MODE_MANUAL;
+    }
+    else if (automatic && !manual) {
+      systemMode = MODE_AUTO;
+    }
 
-    webModeOverride =
-      false;
-
-
-    addHistory(
-      "Web override disabled - physical switch active"
-    );
-
+    addHistory("Web override OFF - physical switch active");
 
     showEvent(
       "OVERRIDE OFF",
@@ -2063,42 +2042,20 @@ void handleMode() {
       "CONTROL RESTORED"
     );
 
-
-    server.send(
-      200,
-      "text/plain",
-      "OK"
-    );
-
+    server.send(200, "text/plain", "OK");
     return;
   }
 
+  // ---------------------------------------------------------------
+  // WEB MANUAL OVERRIDE
+  // ---------------------------------------------------------------
+  if (action == "manual") {
 
-  // ==============================================================
-  // MANUAL OVERRIDE
-  // ==============================================================
+    webModeOverride = true;
+    webSelectedMode = MODE_MANUAL;
+    systemMode = MODE_MANUAL;
 
-  if (
-    action ==
-    "manual"
-  ) {
-
-    webModeOverride =
-      true;
-
-
-    webSelectedMode =
-      MODE_MANUAL;
-
-
-    systemMode =
-      MODE_MANUAL;
-
-
-    addHistory(
-      "Web override: MANUAL"
-    );
-
+    addHistory("Web override: MANUAL");
 
     showEvent(
       "MANUAL OVERRIDE",
@@ -2106,42 +2063,20 @@ void handleMode() {
       "ENABLED"
     );
 
-
-    server.send(
-      200,
-      "text/plain",
-      "OK"
-    );
-
+    server.send(200, "text/plain", "OK");
     return;
   }
 
+  // ---------------------------------------------------------------
+  // WEB AUTO OVERRIDE
+  // ---------------------------------------------------------------
+  if (action == "auto") {
 
-  // ==============================================================
-  // AUTO OVERRIDE
-  // ==============================================================
+    webModeOverride = true;
+    webSelectedMode = MODE_AUTO;
+    systemMode = MODE_AUTO;
 
-  if (
-    action ==
-    "auto"
-  ) {
-
-    webModeOverride =
-      true;
-
-
-    webSelectedMode =
-      MODE_AUTO;
-
-
-    systemMode =
-      MODE_AUTO;
-
-
-    addHistory(
-      "Web override: AUTO"
-    );
-
+    addHistory("Web override: AUTO");
 
     showEvent(
       "AUTO OVERRIDE",
@@ -2149,22 +2084,11 @@ void handleMode() {
       "ENABLED"
     );
 
-
-    server.send(
-      200,
-      "text/plain",
-      "OK"
-    );
-
+    server.send(200, "text/plain", "OK");
     return;
   }
 
-
-  server.send(
-    400,
-    "text/plain",
-    "Invalid mode"
-  );
+  server.send(400, "text/plain", "Invalid mode");
 }
 
 
